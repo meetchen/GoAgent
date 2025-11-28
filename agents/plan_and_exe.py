@@ -1,52 +1,63 @@
-import sys
-import os
-import re
-import time
 import ast
-from colorama import init, Fore, Back, Style
+from core import Agent
 
-# 初始化colorama，支持Windows终端着色
-init()
 
-# 将项目根目录添加到sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from core.llm_client import LLMClient
-from core.tool_executor import ToolExecutor
-
-PLANNER_PROMPT_TEMPLATE = """
+# 默认规划器提示词模板
+DEFAULT_PLANNER_PROMPT = """
 你是一个顶级的AI规划专家。你的任务是将用户提出的复杂问题分解成一个由多个简单步骤组成的行动计划。
 请确保计划中的每个步骤都是一个独立的、可执行的子任务，并且严格按照逻辑顺序排列。
 你的输出必须是一个Python列表，其中每个元素都是一个描述子任务的字符串。
 
 问题: {question}
 
-请严格按照以下格式输出你的计划,```python与```作为前后缀是必要的:
+请严格按照以下格式输出你的计划:
 ```python
 ["步骤1", "步骤2", "步骤3", ...]
 ```
 """
+
+# 默认执行器提示词模板
+DEFAULT_EXECUTOR_PROMPT = """
+你是一位顶级的AI执行专家。你的任务是严格按照给定的计划，一步步地解决问题。
+你将收到原始问题、完整的计划、以及到目前为止已经完成的步骤和结果。
+请你专注于解决"当前步骤"，并仅输出该步骤的最终答案，不要输出任何额外的解释或对话。
+
+# 原始问题:
+{question}
+
+# 完整计划:
+{plan}
+
+# 历史步骤与结果:
+{history}
+
+# 当前步骤:
+{current_step}
+
+请仅输出针对"当前步骤"的回答:
+"""
+
 
 
 # 假定 llm_client.py 中的 HelloAgentsLLM 类已经定义好
 # from llm_client import HelloAgentsLLM
 
 class Planner:
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, prompt_template):
         self.llm_client = llm_client
-
+        self.custom_plan_prompt = prompt_template
     def plan(self, question: str) -> list[str]:
         """
         根据用户问题生成一个行动计划。
         """
-        prompt = PLANNER_PROMPT_TEMPLATE.format(question=question)
+        prompt = self.custom_plan_prompt.format(question=question)
         
         # 为了生成计划，我们构建一个简单的消息列表
         messages = [{"role": "user", "content": prompt}]
         
         print("--- 正在生成计划 ---")
         # 使用流式输出来获取完整的计划
-        response_text = self.llm_client.generate(messages=messages) or ""
+        response_text = self.llm_client.invoke(messages=messages) or ""
         
         print(f"✅ 计划已生成:\n{response_text}")
         
@@ -65,30 +76,10 @@ class Planner:
             print(f"❌ 解析计划时发生未知错误: {e}")
             return []
 
-
-EXECUTOR_PROMPT_TEMPLATE = """
-你是一位顶级的AI执行专家。你的任务是严格按照给定的计划，一步步地解决问题。
-你将收到原始问题、完整的计划、以及到目前为止已经完成的步骤和结果。
-请你专注于解决“当前步骤”，并仅输出该步骤的最终答案，不要输出任何额外的解释或对话。
-
-# 原始问题:
-{question}
-
-# 完整计划:
-{plan}
-
-# 历史步骤与结果:
-{history}
-
-# 当前步骤:
-{current_step}
-
-请仅输出针对“当前步骤”的回答:
-"""
-
 class Executor:
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, prompt_template):
         self.llm_client = llm_client
+        self.custom_exec_prompt = prompt_template
 
     def execute(self, question: str, plan: list[str]) -> str:
         """
@@ -101,7 +92,7 @@ class Executor:
         for i, step in enumerate(plan):
             print(f"\n-> 正在执行步骤 {i+1}/{len(plan)}: {step}")
             
-            prompt = EXECUTOR_PROMPT_TEMPLATE.format(
+            prompt = self.custom_exec_prompt.format(
                 question=question,
                 plan=plan,
                 history=history if history else "无", # 如果是第一步，则历史为空
@@ -110,7 +101,7 @@ class Executor:
             
             messages = [{"role": "user", "content": prompt}]
             
-            response_text = self.llm_client.generate(messages=messages) or ""
+            response_text = self.llm_client.invoke(messages=messages) or ""
             
             # 更新历史记录，为下一步做准备
             history += f"步骤 {i+1}: {step}\n结果: {response_text}\n\n"
@@ -122,14 +113,22 @@ class Executor:
         return final_answer
 
 
-class PlanAndSolveAgent:
-    def __init__(self, llm_client):
+class PlanAndSolveAgent(Agent):
+    def __init__(self, llm_client, custom_prompt=None):
         """
         初始化智能体，同时创建规划器和执行器实例。
         """
+        super().__init__(name="Plan and Solve Agent", llm=llm_client)
         self.llm_client = llm_client
-        self.planner = Planner(self.llm_client)
-        self.executor = Executor(self.llm_client)
+        if custom_prompt is not None:
+            self.custom_plan_prompt = custom_prompt.get("planner", DEFAULT_PLANNER_PROMPT)
+            self.custom_exec_prompt = custom_prompt.get("executor", DEFAULT_EXECUTOR_PROMPT)
+        else:
+            self.custom_plan_prompt = DEFAULT_PLANNER_PROMPT
+            self.custom_exec_prompt = DEFAULT_EXECUTOR_PROMPT
+        self.planner = Planner(self.llm_client, prompt_template=self.custom_plan_prompt)
+        self.executor = Executor(self.llm_client, prompt_template=self.custom_exec_prompt)
+
 
     def run(self, question: str):
         """
@@ -150,16 +149,3 @@ class PlanAndSolveAgent:
         
         print(f"\n--- 任务完成 ---\n最终答案: {final_answer}")
 
-
-if __name__ == "__main__":
-    # 创建LLM客户端实例
-    llm_client = LLMClient()
-    
-    # 创建智能体实例
-    agent = PlanAndSolveAgent(llm_client)
-    
-    # 示例问题
-    question = "一个水果店周一卖出了15个苹果。周二卖出的苹果数量是周一的两倍。周三卖出的数量比周二少了5个。请问这三天总共卖出了多少个苹果？"
-    
-    # 运行智能体
-    agent.run(question)
