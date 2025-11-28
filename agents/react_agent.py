@@ -107,7 +107,7 @@ class ReActAgent(Agent):
     def _parse_output(self, text: str):
         """解析LLM的输出，提取Thought和Action。"""
         thought_match = re.search(r"Thought: (.*?)(?=\nAction:|\Z)", text, re.DOTALL)
-        action_match = re.search(r"Action: (.*?)(?=\n|\Z)", text)
+        action_match = re.search(r"Action: (.*?)(?=\n\n|\Z)", text, re.DOTALL)
         thought = thought_match.group(1).strip() if thought_match else None
         action = action_match.group(1).strip() if action_match else None
         return thought, action

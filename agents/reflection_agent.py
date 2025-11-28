@@ -1,17 +1,18 @@
-import sys
-import os
-from core import Agent, Message, GoAgentLLM
+from core import Agent
 from typing import List, Dict, Any, Optional
 
 
 
 DEFAULT_PROMPTS = {
     "initial": """
-请根据以下要求完成任务:
+请根据以下任务要求给出回答：
 
-任务: {task}
+{task}
 
-请提供一个完整、准确的回答。
+注意：
+- 如果任务要求编写代码/函数，请提供Python代码
+- 如果任务是问答/写文章/分析等，请直接给出文字内容，不要用代码包装
+- 确保回答完整、准确、实用
 """,
     "reflect": """
 请仔细审查以下回答，并找出可能的问题或改进空间:
@@ -23,7 +24,9 @@ DEFAULT_PROMPTS = {
 {content}
 
 请分析这个回答的质量，指出不足之处，并提出具体的改进建议。
-如果回答已经很好，请回答"无需改进"。
+重要提示：
+1.如果回答已经很好，请直接回答"无需改进"。在其他情况下不可以回答这个选项
+2.如果回答有缺陷，请详细说明问题所在，并给出改进建议。
 """,
     "refine": """
 请根据反馈意见改进你的回答:
@@ -37,13 +40,15 @@ DEFAULT_PROMPTS = {
 # 反馈意见:
 {feedback}
 
-请提供一个改进后的回答。
+重要要求：
+1. 只改进内容质量，不要改变输出格式
+2. 如果上一轮回答是纯文本/Markdown格式，继续使用纯文本/Markdown，不要用```python或函数包装
+3. 如果上一轮回答是Python代码，继续使用代码格式
+4. 保持原有的结构和呈现方式，只优化具体内容
+
+请直接输出改进后的回答：
 """
 }
-
-
-# 将项目根目录添加到sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
 
@@ -95,53 +100,25 @@ class Memory:
         return None
 
 
-INITIAL_PROMPT_TEMPLATE = """
-你是一位资深的Python程序员。请根据以下要求，编写一个Python函数。
-你的代码必须包含完整的函数签名、文档字符串，并遵循PEP 8编码规范。
-
-要求: {task}
-
-请直接输出代码，不要包含任何额外的解释。
-"""
-
-
-REFLECT_PROMPT_TEMPLATE = """
-你是一位极其严格的代码评审专家和资深算法工程师，对代码的性能有极致的要求。
-你的任务是审查以下Python代码，并专注于找出其在<strong>算法效率</strong>上的主要瓶颈。
-
-# 原始任务:
-{task}
-
-# 待审查的代码:
-```python
-{code}
-```
-
-请分析该代码的时间复杂度，并思考是否存在一种<strong>算法上更优</strong>的解决方案来显著提升性能。
-如果存在，请清晰地指出当前算法的不足，并提出具体的、可行的改进算法建议（例如，使用筛法替代试除法）。
-如果代码在算法层面已经达到最优，才能回答“无需改进”。
-
-请直接输出你的反馈，不要包含任何额外的解释。
-"""
-
-
-# 假设 llm_client.py 和 memory.py 已定义
-# from llm_client import HelloAgentsLLM
-# from memory import Memory
 
 class ReflectionAgent(Agent):
-    def __init__(self, llm_client, max_iterations=3):
+    def __init__(self, llm_client, custom_prompts = None, max_iterations=3):
         super().__init__(name="Reflection Agent", llm=llm_client)
         self.llm_client = llm_client
         self.memory = Memory()
         self.max_iterations = max_iterations
+        self.custom_prompts = DEFAULT_PROMPTS
+        if  custom_prompts is not None:
+            self.custom_prompts["initial"] = custom_prompts["initial"] or DEFAULT_PROMPTS["initial"]
+            self.custom_prompts["reflect"] = custom_prompts["reflect"] or DEFAULT_PROMPTS["reflect"]
+            self.custom_prompts["refine"] = custom_prompts["refine"] or DEFAULT_PROMPTS["refine"]
 
     def run(self, task: str):
         print(f"\n--- 开始处理任务 ---\n任务: {task}")
 
         # --- 1. 初始执行 ---
         print("\n--- 正在进行初始尝试 ---")
-        initial_prompt = INITIAL_PROMPT_TEMPLATE.format(task=task)
+        initial_prompt = self.custom_prompts["initial"].format(task=task)
         initial_code = self._get_llm_response(initial_prompt)
         self.memory.add_record("execution", initial_code)
 
@@ -151,38 +128,41 @@ class ReflectionAgent(Agent):
 
             # a. 反思
             print("\n-> 正在进行反思...")
-            last_code = self.memory.get_last_execution()
-            reflect_prompt = REFLECT_PROMPT_TEMPLATE.format(task=task, code=last_code)
+            last_answer = self.memory.get_last_execution()
+            reflect_prompt = self.custom_prompts["reflect"].format(task=task, content=last_answer)
             feedback = self._get_llm_response(reflect_prompt)
             self.memory.add_record("reflection", feedback)
 
             # b. 检查是否需要停止
-            if "无需改进" in feedback:
-                print("\n✅ 反思认为代码已无需改进，任务完成。")
+            # 检查是否明确表示无需改进（句首或独立行）
+            feedback_lines = feedback.strip().split('\n')
+            should_stop = any(
+                line.strip() in ["无需改进", "无需修改", "完美实现"] or
+                line.strip().startswith("无需改进") or
+                line.strip().startswith("无需修改")
+                for line in feedback_lines
+            )
+            if should_stop:
+                print("\n✅ 反思认为回答已达到高质量标准，任务完成。")
                 break
 
             # c. 优化
             print("\n-> 正在进行优化...")
-            refine_prompt = REFINE_PROMPT_TEMPLATE.format(
+            refine_prompt = self.custom_prompts["refine"].format(
                 task=task,
-                last_code_attempt=last_code,
+                last_attempt=last_answer,
                 feedback=feedback
             )
             refined_code = self._get_llm_response(refine_prompt)
             self.memory.add_record("execution", refined_code)
         
-        final_code = self.memory.get_last_execution()
-        print(f"\n--- 任务完成 ---\n最终生成的代码:\n```python\n{final_code}\n```")
-        return final_code
+        final_answer = self.memory.get_last_execution()
+        print(f"\n--- 任务完成 ---\n最终生成的结果:\n\n{final_answer}")
+        return final_answer
 
     def _get_llm_response(self, prompt: str) -> str:
         """一个辅助方法，用于调用LLM并获取完整的流式响应。"""
         messages = [{"role": "user", "content": prompt}]
-        response_text = self.llm_client.generate(messages=messages) or ""
+        response_text = self.llm_client.invoke(messages=messages) or ""
         return response_text
 
-if __name__ == "__main__":
-    llm = LLMClient()
-    agent = ReflectionAgent(llm_client=llm, max_iterations=3)
-    task_description = "编写一个函数，返回给定整数n以内的所有素数列表。"
-    agent.run(task_description)
